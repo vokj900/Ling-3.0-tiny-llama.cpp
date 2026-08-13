@@ -24,20 +24,43 @@ jobs:
       contents: write
 
     steps:
-      # 1. 物理屏蔽预装MinGW（核心修复：无需卸载权限，直接重命名目录）
+      # 1. 【暴力兜底版】物理屏蔽预装MinGW（先查路径、再重命名、失败直接删文件）
       - name: Disable Preinstalled MinGW
         shell: cmd
         run: |
-          echo === 物理屏蔽预装MinGW（重命名目录，彻底消灭cc.exe）===
+          echo === 物理屏蔽预装MinGW ===
+          echo 当前cc.exe位置：
+          where cc.exe || echo cc.exe未找到
+          echo 当前gcc.exe位置：
+          where gcc.exe || echo gcc.exe未找到
+          
+          REM 优先尝试重命名MinGW根目录
           if exist "C:\mingw64" (
+            echo 尝试重命名C:\mingw64为C:\mingw64_bak...
             ren "C:\mingw64" "C:\mingw64_bak"
-            echo MinGW目录已重命名为 C:\mingw64_bak
+            if %ERRORLEVEL% equ 0 (
+              echo ✅ MinGW目录重命名成功
+            ) else (
+              echo ⚠️ 重命名失败（可能权限限制），直接删除编译器可执行文件...
+              if exist "C:\mingw64\bin\cc.exe" del /f /q "C:\mingw64\bin\cc.exe"
+              if exist "C:\mingw64\bin\gcc.exe" del /f /q "C:\mingw64\bin\gcc.exe"
+              if exist "C:\mingw64\bin\g++.exe" del /f /q "C:\mingw64\bin\g++.exe"
+              echo ✅ 核心编译器文件已强制删除
+            )
           ) else (
-            echo MinGW目录不存在，无需处理
+            echo MinGW根目录不存在，扫描全系统残留编译器...
+            REM 兜底：遍历删除所有找到的GNU编译器
+            for %%i in (cc.exe gcc.exe g++.exe) do (
+              for /f "delims=" %%j in ('where %%i 2^>nul') do (
+                echo 删除残留文件：%%j
+                del /f /q "%%j"
+              )
+            )
           )
-          echo === 验证MinGW是否已清除 ===
-          where cc.exe && (echo ❌ 错误：cc.exe仍存在！ && exit /b 1) || echo ✅ cc.exe已彻底消失
-          where gcc.exe && (echo ❌ 错误：gcc.exe仍存在！ && exit /b 1) || echo ✅ gcc.exe已彻底消失
+          
+          echo === 最终验证MinGW是否已清除 ===
+          where cc.exe && (echo ❌ 错误：cc.exe仍存在！路径： && where cc.exe && exit /b 1) || echo ✅ cc.exe已彻底消失
+          where gcc.exe && (echo ❌ 错误：gcc.exe仍存在！路径： && where gcc.exe && exit /b 1) || echo ✅ gcc.exe已彻底消失
 
       # 2. 拉取aetherbird官方bailingmoe3-support分支（完全匹配你提供的仓库链接）
       - name: Checkout aetherbird/llama.cpp (bailingmoe3-support)
@@ -47,7 +70,7 @@ jobs:
           ref: bailingmoe3-support
           submodules: recursive
 
-      # 3. 加载MSVC环境（官方Action，100%解决路径问题，环境变量自动继承到后续步骤）
+      # 3. 加载MSVC环境（官方Action，100%解决路径问题）
       - name: Setup MSVC Environment
         uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -80,20 +103,20 @@ jobs:
           cmake -S . -B build -G "Ninja Multi-Config" ^
             -DCMAKE_C_COMPILER=cl.exe ^
             -DCMAKE_CXX_COMPILER=cl.exe ^
-            -DCMAKE_C_COMPILER_WORKS=ON ^          # 强制跳过C编译器检测，避免/MT参数报错
-            -DCMAKE_CXX_COMPILER_WORKS=ON ^        # 强制跳过C++编译器检测
-            -DCMAKE_IGNORE_PATH="C:/mingw64_bak/bin" ^ # 强制忽略重命名后的MinGW路径
-            -DGGML_CUDA=ON ^                        # 启用CUDA后端（llama.cpp官方标准开关）
-            -DCMAKE_CUDA_ARCHITECTURES="120" ^      # RTX 50系Blackwell架构专属算力
-            -DGGML_CUDA_FA_ALL_QUANTS=ON ^          # 编译Flash Attention量化内核（MoE模型必需）
-            -DGGML_NATIVE=OFF ^                     # 关闭CPU原生优化，保证二进制通用性
-            -DLLAMA_BUILD_SERVER=ON ^               # 仅构建llama-server目标
-            -DLLAMA_BUILD_BORINGSSL=OFF ^           # 禁用BoringSSL，使用系统OpenSSL
-            -DOPENSSL_USE_STATIC_LIBS=ON ^          # 静态链接OpenSSL，避免运行时依赖
+            -DCMAKE_C_COMPILER_WORKS=ON ^
+            -DCMAKE_CXX_COMPILER_WORKS=ON ^
+            -DCMAKE_IGNORE_PATH="C:/mingw64_bak/bin" ^
+            -DGGML_CUDA=ON ^
+            -DCMAKE_CUDA_ARCHITECTURES="120" ^
+            -DGGML_CUDA_FA_ALL_QUANTS=ON ^
+            -DGGML_NATIVE=OFF ^
+            -DLLAMA_BUILD_SERVER=ON ^
+            -DLLAMA_BUILD_BORINGSSL=OFF ^
+            -DOPENSSL_USE_STATIC_LIBS=ON ^
             -DOPENSSL_ROOT_DIR="C:\Program Files\OpenSSL-Win64" ^
-            -DCMAKE_C_FLAGS="/MT" ^                 # 静态链接VC运行库
+            -DCMAKE_C_FLAGS="/MT" ^
             -DCMAKE_CXX_FLAGS="/MT" ^
-            -DCMAKE_VERBOSE_MAKEFILE=ON             # 输出详细编译日志，方便排查问题
+            -DCMAKE_VERBOSE_MAKEFILE=ON
           if %ERRORLEVEL% neq 0 (echo ❌ CMake配置失败 && exit /b 1)
           echo ✅ CMake配置完成，已强制使用MSVC编译器
 
@@ -140,10 +163,10 @@ jobs:
             基于[aetherbird/llama.cpp](https://github.com/aetherbird/llama.cpp/tree/bailingmoe3-support)的`bailingmoe3-support`分支编译，原生支持Ling-3.0-tiny的`bailingmoe3`架构。
 
             ### ✨ 核心特性
-            - **CUDA 12.8 + sm_120**：Blackwell架构原生编译，适配全RTX 50系桌面显卡（5050/5060/5060Ti/5070/5080/5090）
-            - **Windows原生运行**：无需WSL，直接调用显卡驱动，性能与Linux持平
-            - **开箱即用**：静态链接OpenSSL+VC++运行库，内置CUDA 12.8运行库，无需额外安装依赖
-            - **MoE模型优化**：启用Flash Attention全量化内核，大幅提升Ling-3.0-tiny推理效率
+            - **CUDA 12.8 + sm_120**：Blackwell架构原生编译，适配全RTX 50系桌面显卡
+            - **Windows原生运行**：无需WSL，直接调用显卡驱动
+            - **开箱即用**：静态链接OpenSSL+VC++运行库，内置CUDA 12.8运行库
+            - **MoE模型优化**：启用Flash Attention全量化内核，提升Ling-3.0-tiny推理效率
 
             ### 💻 显存适配参考
             | 显存 | 适用显卡 | 推荐模型规模 |
@@ -153,6 +176,9 @@ jobs:
             | 32GB | RTX 5090 | 70B以内量化模型 |
 
             ### 🚀 快速使用
-            1. 下载下方`ling30tiny-server-rtx50series-${{ inputs.tag_name }}-cuda12.8.zip`并解压到纯英文目录
-            2. 放入Ling-3.0-tiny GGUF模型（需自行转换或使用社区版本）
-            3. 在该目录打开PowerShell，运行：
+            1. 下载下方zip解压到纯英文目录
+            2. 放入Ling-3.0-tiny GGUF模型
+            3. PowerShell运行：` .\llama-server.exe -m your_model.gguf --jinja --host 0.0.0.0 --port 8080 -ngl 999 -t 16`
+            4. 浏览器访问`http://localhost:8080`即可对话
+
+            ### 📝 文件校验
