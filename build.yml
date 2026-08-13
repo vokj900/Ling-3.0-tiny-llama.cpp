@@ -1,0 +1,140 @@
+name: Build Ling-3.0-tiny Server for RTX 50 Series (Windows Native)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release 版本号（如 v1.0.0）'
+        required: true
+        default: 'v1.0.0'
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  build:
+    runs-on: windows-2022
+    permissions:
+      actions: write
+      contents: write
+
+    steps:
+      # 0. 【关键】彻底卸载预装MinGW（GitHub Runner的MinGW是choco安装的，官方卸载最干净）
+      - name: Uninstall Preinstalled MinGW
+        shell: cmd
+        run: |
+          echo === 卸载预装MinGW ===
+          choco uninstall mingw -y --force --no-progress
+          echo === 验证MinGW是否已清除 ===
+          where cc.exe && (echo ❌ 错误：cc.exe仍存在！ && exit /b 1) || echo ✅ cc.exe已彻底消失
+          where gcc.exe && (echo ❌ 错误：gcc.exe仍存在！ && exit /b 1) || echo ✅ gcc.exe已彻底消失
+
+      # 1. 拉取aetherbird官方bailingmoe3-support分支（完全匹配你给的链接）
+      - name: Checkout aetherbird/llama.cpp (bailingmoe3-support)
+        uses: actions/checkout@v4
+        with:
+          repository: aetherbird/llama.cpp
+          ref: bailingmoe3-support
+          submodules: recursive
+
+      # 2. 加载MSVC环境（官方维护的Action，100%解决路径问题，自动设置PATH）
+      - name: Setup MSVC Environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # 3. 安装和Maple成功时完全一致的CMake版本（规避CMake 4.4的新bug）
+      - name: Setup CMake 3.28.1
+        uses: lukka/get-cmake@v3.28.1
+
+      # 4. 安装依赖（同job环境变量自动继承）
+      - name: Install Dependencies
+        shell: cmd
+        run: |
+          choco install openssl ninja -y --no-progress
+          where ninja || (echo ❌ ninja未安装 && exit /b 1)
+          where cl.exe || (echo ❌ cl.exe未加载 && exit /b 1)
+          nvcc --version || (echo ❌ nvcc未找到 && exit /b 1)
+          echo === 当前PATH（验证无MinGW残留）===
+          echo %PATH% | findstr /i mingw && (echo ❌ PATH中仍有MinGW残留！ && exit /b 1) || echo ✅ PATH无MinGW残留
+
+      # 5. CMake配置（极端参数强制使用MSVC，完全忽略MinGW）
+      - name: Configure CMake
+        shell: cmd
+        run: |
+          if exist build rmdir /s /q build
+          mkdir build
+          cmake -S . -B build -G "Ninja Multi-Config" ^
+            -DCMAKE_C_COMPILER=cl.exe ^
+            -DCMAKE_CXX_COMPILER=cl.exe ^
+            -DCMAKE_C_COMPILER_WORKS=ON ^          # 强制跳过C编译器检测
+            -DCMAKE_CXX_COMPILER_WORKS=ON ^        # 强制跳过C++编译器检测
+            -DCMAKE_IGNORE_PATH="C:/mingw64/bin" ^ # 强制忽略MinGW路径
+            -DGGML_CUDA=ON ^
+            -DCMAKE_CUDA_ARCHITECTURES="120" ^
+            -DGGML_CUDA_FA_ALL_QUANTS=ON ^
+            -DGGML_NATIVE=OFF ^
+            -DLLAMA_BUILD_SERVER=ON ^
+            -DLLAMA_BUILD_BORINGSSL=OFF ^
+            -DOPENSSL_USE_STATIC_LIBS=ON ^
+            -DOPENSSL_ROOT_DIR="C:\Program Files\OpenSSL-Win64" ^
+            -DCMAKE_C_FLAGS="/MT" ^
+            -DCMAKE_CXX_FLAGS="/MT" ^
+            -DCMAKE_VERBOSE_MAKEFILE=ON
+          if %ERRORLEVEL% neq 0 (echo ❌ CMake配置失败 && exit /b 1)
+
+      # 6. 编译llama-server
+      - name: Build llama-server
+        shell: cmd
+        run: |
+          set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
+          cmake --build build --config Release -j %NINJA_JOBS% -t llama-server
+          if %ERRORLEVEL% neq 0 (echo ❌ 编译失败 && exit /b 1)
+          echo 🎉 编译成功！
+
+      # 7. 收集产物
+      - name: Collect artifacts
+        shell: cmd
+        run: |
+          mkdir out
+          copy build\bin\Release\llama-server.exe out\
+          copy build\bin\Release\ggml*.dll out\
+          copy build\bin\Release\llama*.dll out\
+          copy build\bin\Release\mtmd.dll out\
+          copy "%CUDA_PATH%\bin\cudart64_*.dll" out\
+          copy "%CUDA_PATH%\bin\cublas64_*.dll" out\
+          copy "%CUDA_PATH%\bin\cublasLt64_*.dll" out\
+          copy "C:\Windows\System32\vcruntime140.dll" out\
+          copy "C:\Windows\System32\vcruntime140_1.dll" out\
+          copy "C:\Windows\System32\msvcp140.dll" out\
+          copy "C:\Windows\System32\msvcp140_1.dll" out\
+          copy "C:\Windows\System32\msvcp140_2.dll" out\
+          copy "C:\Windows\System32\concrt140.dll" out\
+          echo === 产物列表 ===
+          dir out\
+
+      # 8. 发布Release
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag_name }}
+          name: Ling-3.0-tiny Server ${{ inputs.tag_name }} — Windows Native RTX 50 Series
+          body: |
+            ## 🐦 Ling-3.0-tiny Windows 原生版（RTX 50 Series / Blackwell sm_120）
+            基于aetherbird/llama.cpp `bailingmoe3-support`分支编译，原生支持Ling-3.0-tiny的`bailingmoe3`架构。
+            ### ✨ 特性
+            - CUDA 12.8 + sm_120：适配全RTX 50系桌面显卡
+            - Windows原生：无需WSL，直接调用显卡驱动
+            - 开箱即用：静态链接OpenSSL+VC++运行库
+            ### 🚀 快速使用
+            1. 下载zip解压到纯英文目录
+            2. 放入Ling-3.0-tiny GGUF模型
+            3. PowerShell运行：`.\llama-server.exe -m your_model.gguf --jinja --host 0.0.0.0 --port 8080 -ngl 999 -t 16`
+          files: |
+            out/llama-server.exe
+            out/*.dll
