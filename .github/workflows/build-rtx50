@@ -24,45 +24,41 @@ jobs:
       contents: write
 
     steps:
-      # 1. 【暴力兜底版】物理屏蔽预装MinGW（先查路径、再重命名、失败直接删文件）
+      # 1. 【暴力删除版】直接干掉预装MinGW的编译器文件（完全不用choco）
       - name: Disable Preinstalled MinGW
         shell: cmd
         run: |
-          echo === 物理屏蔽预装MinGW ===
-          echo 当前cc.exe位置：
+          echo === 第一步：定位cc.exe的准确路径 ===
           where cc.exe || echo cc.exe未找到
-          echo 当前gcc.exe位置：
           where gcc.exe || echo gcc.exe未找到
           
-          REM 优先尝试重命名MinGW根目录
-          if exist "C:\mingw64" (
-            echo 尝试重命名C:\mingw64为C:\mingw64_bak...
-            ren "C:\mingw64" "C:\mingw64_bak"
-            if %ERRORLEVEL% equ 0 (
-              echo ✅ MinGW目录重命名成功
-            ) else (
-              echo ⚠️ 重命名失败（可能权限限制），直接删除编译器可执行文件...
-              if exist "C:\mingw64\bin\cc.exe" del /f /q "C:\mingw64\bin\cc.exe"
-              if exist "C:\mingw64\bin\gcc.exe" del /f /q "C:\mingw64\bin\gcc.exe"
-              if exist "C:\mingw64\bin\g++.exe" del /f /q "C:\mingw64\bin\g++.exe"
-              echo ✅ 核心编译器文件已强制删除
-            )
-          ) else (
-            echo MinGW根目录不存在，扫描全系统残留编译器...
-            REM 兜底：遍历删除所有找到的GNU编译器
-            for %%i in (cc.exe gcc.exe g++.exe) do (
-              for /f "delims=" %%j in ('where %%i 2^>nul') do (
-                echo 删除残留文件：%%j
-                del /f /q "%%j"
-              )
+          echo === 第二步：强制删除所有GNU编译器文件 ===
+          REM 直接删除所有找到的cc/gcc/g++可执行文件
+          for %%i in (cc.exe gcc.exe g++.exe) do (
+            for /f "delims=" %%j in ('where %%i 2^>nul') do (
+              echo 发现残留编译器：%%j
+              del /f /q "%%j" || echo 删除%%j失败，可能权限受限
             )
           )
           
-          echo === 最终验证MinGW是否已清除 ===
-          where cc.exe && (echo ❌ 错误：cc.exe仍存在！路径： && where cc.exe && exit /b 1) || echo ✅ cc.exe已彻底消失
-          where gcc.exe && (echo ❌ 错误：gcc.exe仍存在！路径： && where gcc.exe && exit /b 1) || echo ✅ gcc.exe已彻底消失
+          REM 额外处理已知的MinGW默认路径
+          if exist "C:\mingw64\bin\cc.exe" del /f /q "C:\mingw64\bin\cc.exe"
+          if exist "C:\mingw64\bin\gcc.exe" del /f /q "C:\mingw64\bin\gcc.exe"
+          if exist "C:\mingw64\bin\g++.exe" del /f /q "C:\mingw64\bin\g++.exe"
+          
+          echo === 第三步：最终验证 ===
+          where cc.exe && (
+            echo ❌ 致命错误：cc.exe仍存在！当前路径：
+            where cc.exe
+            exit /b 1
+          ) || echo ✅ cc.exe已彻底删除
+          where gcc.exe && (
+            echo ❌ 致命错误：gcc.exe仍存在！当前路径：
+            where gcc.exe
+            exit /b 1
+          ) || echo ✅ gcc.exe已彻底删除
 
-      # 2. 拉取aetherbird官方bailingmoe3-support分支（完全匹配你提供的仓库链接）
+      # 2. 拉取aetherbird官方bailingmoe3-support分支
       - name: Checkout aetherbird/llama.cpp (bailingmoe3-support)
         uses: actions/checkout@v4
         with:
@@ -105,7 +101,6 @@ jobs:
             -DCMAKE_CXX_COMPILER=cl.exe ^
             -DCMAKE_C_COMPILER_WORKS=ON ^
             -DCMAKE_CXX_COMPILER_WORKS=ON ^
-            -DCMAKE_IGNORE_PATH="C:/mingw64_bak/bin" ^
             -DGGML_CUDA=ON ^
             -DCMAKE_CUDA_ARCHITECTURES="120" ^
             -DGGML_CUDA_FA_ALL_QUANTS=ON ^
